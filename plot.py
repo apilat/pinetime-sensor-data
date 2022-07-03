@@ -6,8 +6,8 @@ import json
 
 axis = []
 data = [[], [], []]
-for line in open("motion.log", "r"):
-    time, x, y, z = line.split()
+for line in open(0):
+    time, _, x, y, z = line.split()
     time = datetime.fromtimestamp(float(time))
     x, y, z = map(float, (x, y, z))
     axis.append(time)
@@ -25,9 +25,9 @@ def aggregate(data, k):
     data.resize((len(data) + k - 1) // k * k)
     return data.reshape((-1,k)).sum(axis=1) / k
 
-interval = 10
+interval = 1
 for i, a in ((0, "x"), (1, "y"), (2, "z")):
-    plt.plot(axis[::interval], aggregate(data[i], interval), label=a)
+    plt.scatter(axis[::interval], aggregate(data[i], interval), label=a, marker='o')
     #plt.plot(axis, deltas(data[i]), label=a)
 
 #abs_deltas = np.array([math.hypot(*ds) for ds in zip(*map(deltas, data))])
