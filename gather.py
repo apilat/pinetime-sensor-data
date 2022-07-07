@@ -21,15 +21,18 @@ DEVICE_MAC =         [
         'C4:0E:54:C5:A9:EA',
         'DB:47:A9:51:E7:68',
     ]
-MOTION_SVC_UUID =    '00030000-78fc-48fe-8e23-433b3a1942d0'
-MOTION_CHRC_UUID =   '00030002-78fc-48fe-8e23-433b3a1942d0'
+MOTION_CHRC_UUID         = '00030002-78fc-48fe-8e23-433b3a1942d0'
+HEARTRATE_SVC_UUID       = '0000180d-0000-1000-8000-00805f9b34fb'
+HEARTRATE_CHRC_UUID      = '00002a37-0000-1000-8000-00805f9b34fb'
+HEARTRATE_CTRL_CHRC_UUID = '00050001-78fc-48fe-8e23-433b3a1942d0'
 
 
 bus = None
 mainloop = None
 adapters = []
 devices = []
-services = []
+motion_services = []
+heartrate_services = []
 
 motion_chrc = None
 device_conn_chrc = None
@@ -67,7 +70,6 @@ def start_device(path):
     def prop_changed(iface, changed_props, invalidated_props, path):
         if "Connected" in changed_props:
             conn_changed(changed_props["Connected"], path)
-        print("DEV", path, changed_props, invalidated_props)
 
     obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
     obj.connect_to_signal("PropertiesChanged", prop_changed, path_keyword='path')
@@ -75,51 +77,39 @@ def start_device(path):
     conn_changed(conn, path)
 
 def start_service(path):
-    def value_changed(val, path):
-        x, y, z = struct.unpack("<hhh", bytes(val))
-        msg = f"{time.time():.6f} {path} {x:5} {y:5} {z:5}\n"
-        #print(msg, end='')
-        motion_log.write(msg)
-        motion_log.flush()
-
-    def notifying_changed(val, path):
-        if val:
-            log(f"{path} started notifying")
-        else:
-            log(f"{path} stopped notifying")
-            if path not in services:
-                log(f"{path} disappeared, not starting notify")
-                return
-            obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
-            obj.StartNotify(dbus_interface=GATT_CHRC_IFACE)
-
-    def motion_changed(iface, changed_props, invalidated_props, path):
-        if "Value" in changed_props:
-            value_changed(changed_props["Value"], path)
-        if "Notifying" in changed_props:
-            notifying_changed(changed_props["Notifying"], path)
-        if "Value" not in changed_props or len(changed_props) > 1:
-            print("SVC", path, changed_props, invalidated_props)
-
-    obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
-    obj.connect_to_signal("PropertiesChanged", motion_changed, path_keyword='path')
-    notifying = obj.Get(GATT_CHRC_IFACE, "Notifying", dbus_interface=DBUS_PROP_IFACE)
-    notifying_changed(notifying, path)
+    pass
 
 def interfaces_added(path, ifaces):
-    global adapters, devices, services
+    global adapters, devices, motion_services, heartrate_services
     if ADAPTER_IFACE in ifaces:
         adapters.append(path)
         log(f"{path} adapter discovered")
+        start_adapter(path)
     if DEVICE_IFACE in ifaces and ifaces[DEVICE_IFACE]["Address"] in DEVICE_MAC:
         devices.append(path)
         log(f"{path} device discovered")
+        start_device(path)
     if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == MOTION_CHRC_UUID:
-        services.append(path)
-        log(f"{path} service discovered")
+        motion_services.append(path)
+        log(f"{path} motion char discovered")
+        start_service(path)
+
+    if GATT_SERVICE_IFACE in ifaces and ifaces[GATT_SERVICE_IFACE]["UUID"] == HEARTRATE_SVC_UUID:
+        log(f"{path} heartrate svc discovered")
+        heartrate_services.append([path, None, None])
+    if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == HEARTRATE_CHRC_UUID:
+        log(f"{path} heartrate char discovered")
+        for sv in heartrate_services:
+            if path.startswith(sv[0]):
+                sv[1] = path
+    if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == HEARTRATE_CTRL_CHRC_UUID:
+        log(f"{path} heartrate ctrl discovered")
+        for sv in heartrate_services:
+            if path.startswith(sv[0]):
+                sv[2] = path
 
 def interfaces_removed(path, ifaces):
-    global adapters, devices, services
+    global adapters, devices, motion_services, heartrate_services
     if ADAPTER_IFACE in ifaces and path in adapters:
         adapters.remove(path)
         log(f"{path} adapter removed")
@@ -127,16 +117,45 @@ def interfaces_removed(path, ifaces):
         devices.remove(path)
         log(f"{path} device removed")
     if GATT_CHRC_IFACE in ifaces and path in services:
-        services.remove(path)
-        log(f"{path} service removed")
+        motion_services.remove(path)
+        log(f"{path} motion char removed")
+    if GATT_SERVICE_IFACE in ifaces and ifaces[GATT_SERVICE_IFACE]["UUID"] == HEARTRATE_SVC_UUID:
+        log(f"{path} heartrate svc removed")
+        heartrate_services = [x for x in heartrate_services if x[0] != path]
 
 def log(*args, **kwargs):
     print(f"{time.time():.6f}", *args, **kwargs, file=sys.stderr)
 
-def fix_services():
-    for sv in services:
-        obj = bus.get_object(BLUEZ_SERVICE_NAME, sv)
+def query_motion_services():
+    for sv in motion_services:
+        try:
+            obj = bus.get_object(BLUEZ_SERVICE_NAME, sv)
+            val = obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
+            x, y, z = struct.unpack("<hhh", bytes(val))
+            msg = f"{time.time():.6f} {sv} {x} {y} {z}\n"
+            #print(msg, end='')
+            motion_log.write(msg)
+            motion_log.flush()
+        except Exception as e:
+            log(f"{sv} read failed: {e}")
+    return True
 
+def query_heartrate_services():
+    for sv, char, ctrl in heartrate_services:
+        try:
+            char_obj = bus.get_object(BLUEZ_SERVICE_NAME, char)
+            ctrl_obj = bus.get_object(BLUEZ_SERVICE_NAME, ctrl)
+            ctrl_obj.WriteValue(b"\x01", {}, dbus_interface=GATT_CHRC_IFACE)
+            def ready():
+                val = char_obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
+                hr = int(val[1])
+                msg = f"{time.time():.6f} {sv} {hr}\n"
+                print(msg, end='')
+                ctrl_obj.WriteValue(b"\x00", {}, dbus_interface=GATT_CHRC_IFACE)
+            GLib.timeout_add(9000, ready)
+        except Exception as e:
+            log(f"{sv} measure failed: {e}")
+    return True
 
 def main():
     global bus, mainloop, motion_log
@@ -151,8 +170,10 @@ def main():
     for path, ifaces in om_iface.GetManagedObjects().items():
         interfaces_added(path, ifaces)
 
-    query_interval = 100
-    GLib.timeout_add(query_interval, query_services)
+    query_motion_interval = 100
+    GLib.timeout_add(query_motion_interval, query_motion_services)
+    query_heartrate_interval = 15000
+    GLib.timeout_add(query_heartrate_interval, query_heartrate_services)
 
     mainloop.run()
 
