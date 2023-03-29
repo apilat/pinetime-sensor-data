@@ -19,7 +19,7 @@ GATT_CHRC_IFACE =    'org.bluez.GattCharacteristic1'
 
 DEVICE_MAC =         [
         'C4:0E:54:C5:A9:EA',
-        'DB:47:A9:51:E7:68',
+        #'DB:47:A9:51:E7:68',
     ]
 MOTION_CHRC_UUID         = '00030002-78fc-48fe-8e23-433b3a1942d0'
 HEARTRATE_SVC_UUID       = '0000180d-0000-1000-8000-00805f9b34fb'
@@ -37,6 +37,7 @@ heartrate_services = []
 motion_chrc = None
 device_conn_chrc = None
 motion_log = None
+hr_log = None
 
 
 def start_adapter(path):
@@ -133,7 +134,6 @@ def query_motion_services():
             val = obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
             x, y, z = struct.unpack("<hhh", bytes(val))
             msg = f"{time.time():.6f} {sv} {x} {y} {z}\n"
-            #print(msg, end='')
             motion_log.write(msg)
             motion_log.flush()
         except Exception as e:
@@ -150,7 +150,8 @@ def query_heartrate_services():
                 val = char_obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
                 hr = int(val[1])
                 msg = f"{time.time():.6f} {sv} {hr}\n"
-                print(msg, end='')
+                hr_log.write(msg)
+                hr_log.flush()
                 ctrl_obj.WriteValue(b"\x00", {}, dbus_interface=GATT_CHRC_IFACE)
             GLib.timeout_add(9000, ready)
         except Exception as e:
@@ -158,11 +159,12 @@ def query_heartrate_services():
     return True
 
 def main():
-    global bus, mainloop, motion_log
+    global bus, mainloop, motion_log, hr_log
     DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     mainloop = GLib.MainLoop()
     motion_log = open("data/motion.log", "a")
+    hr_log = open("data/hr.log", "a")
 
     om_iface = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, '/'), DBUS_OM_IFACE)
     om_iface.connect_to_signal("InterfacesAdded", interfaces_added)
@@ -170,9 +172,9 @@ def main():
     for path, ifaces in om_iface.GetManagedObjects().items():
         interfaces_added(path, ifaces)
 
-    query_motion_interval = 100
+    query_motion_interval = 1000
     GLib.timeout_add(query_motion_interval, query_motion_services)
-    query_heartrate_interval = 15000
+    query_heartrate_interval = 20000
     GLib.timeout_add(query_heartrate_interval, query_heartrate_services)
 
     mainloop.run()
