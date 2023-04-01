@@ -26,158 +26,124 @@ HEARTRATE_SVC_UUID       = '0000180d-0000-1000-8000-00805f9b34fb'
 HEARTRATE_CHRC_UUID      = '00002a37-0000-1000-8000-00805f9b34fb'
 HEARTRATE_CTRL_CHRC_UUID = '00050001-78fc-48fe-8e23-433b3a1942d0'
 
-
 bus = None
-mainloop = None
-adapters = []
-devices = []
-motion_services = []
-heartrate_services = []
-
-motion_chrc = None
-device_conn_chrc = None
-motion_log = None
-hr_log = None
-
-
-def start_adapter(path):
-    log(f"{path} starting discovery")
-    obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
-    obj.StartDiscovery(dbus_interface=ADAPTER_IFACE)
-
-def start_device(path):
-    def try_reconnect(path):
-        if path not in devices:
-            log(f"{path} disappeared, not reconnecting")
-            return
-        def reconnect_failed(error, path):
-            timeout = 15
-            log(f"{path} connection failed retrying in {timeout}s: {error}")
-            GLib.timeout_add(timeout * 1000, lambda path=path: try_reconnect(path))
-
-        log(f"{path} trying to reconnect")
-        obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
-        obj.Connect(reply_handler=lambda:(),
-                error_handler=lambda error: reconnect_failed(error, path),
-                dbus_interface=DEVICE_IFACE)
-
-    def conn_changed(val, path):
-        if val:
-            log(f"{path} connected")
-        else:
-            log(f"{path} disconnected")
-            try_reconnect(path)
-
-    def prop_changed(iface, changed_props, invalidated_props, path):
-        if "Connected" in changed_props:
-            conn_changed(changed_props["Connected"], path)
-
-    obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
-    obj.connect_to_signal("PropertiesChanged", prop_changed, path_keyword='path')
-    conn = obj.Get(DEVICE_IFACE, "Connected", dbus_interface=DBUS_PROP_IFACE)
-    conn_changed(conn, path)
-
-def start_service(path):
-    pass
-
-def interfaces_added(path, ifaces):
-    global adapters, devices, motion_services, heartrate_services
-    if ADAPTER_IFACE in ifaces:
-        adapters.append(path)
-        log(f"{path} adapter discovered")
-        start_adapter(path)
-    if DEVICE_IFACE in ifaces and ifaces[DEVICE_IFACE]["Address"] in DEVICE_MAC:
-        devices.append(path)
-        log(f"{path} device discovered")
-        start_device(path)
-    if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == MOTION_CHRC_UUID:
-        motion_services.append(path)
-        log(f"{path} motion char discovered")
-        start_service(path)
-
-    if GATT_SERVICE_IFACE in ifaces and ifaces[GATT_SERVICE_IFACE]["UUID"] == HEARTRATE_SVC_UUID:
-        log(f"{path} heartrate svc discovered")
-        heartrate_services.append([path, None, None])
-    if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == HEARTRATE_CHRC_UUID:
-        log(f"{path} heartrate char discovered")
-        for sv in heartrate_services:
-            if path.startswith(sv[0]):
-                sv[1] = path
-    if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == HEARTRATE_CTRL_CHRC_UUID:
-        log(f"{path} heartrate ctrl discovered")
-        for sv in heartrate_services:
-            if path.startswith(sv[0]):
-                sv[2] = path
-
-def interfaces_removed(path, ifaces):
-    global adapters, devices, motion_services, heartrate_services
-    if ADAPTER_IFACE in ifaces and path in adapters:
-        adapters.remove(path)
-        log(f"{path} adapter removed")
-    if DEVICE_IFACE in ifaces and path in devices:
-        devices.remove(path)
-        log(f"{path} device removed")
-    if GATT_CHRC_IFACE in ifaces and path in services:
-        motion_services.remove(path)
-        log(f"{path} motion char removed")
-    if GATT_SERVICE_IFACE in ifaces and ifaces[GATT_SERVICE_IFACE]["UUID"] == HEARTRATE_SVC_UUID:
-        log(f"{path} heartrate svc removed")
-        heartrate_services = [x for x in heartrate_services if x[0] != path]
+log_file = None
 
 def log(*args, **kwargs):
-    print(f"{time.time():.6f}", *args, **kwargs, file=sys.stderr)
+    print(f"{time.time():.6f}", *args, **kwargs, file=log_file)
+    print(*args, **kwargs, file=sys.stderr)
 
-def query_motion_services():
-    for sv in motion_services:
-        try:
-            obj = bus.get_object(BLUEZ_SERVICE_NAME, sv)
-            val = obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
-            x, y, z = struct.unpack("<hhh", bytes(val))
-            msg = f"{time.time():.6f} {sv} {x} {y} {z}\n"
-            motion_log.write(msg)
-            motion_log.flush()
-        except Exception as e:
-            log(f"{sv} read failed: {e}")
+def reset_connection(hard):
+    log(f"trying to reset connection {hard=}")
+    om_iface = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, '/'), DBUS_OM_IFACE)
+    if hard:
+        for path, ifaces in om_iface.GetManagedObjects().items():
+            if ADAPTER_IFACE in ifaces:
+                obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
+                try:
+                    obj.StartDiscovery(dbus_interface=ADAPTER_IFACE)
+                    log(f"starting discovery on adapter {path}")
+                except Exception as exc:
+                    log(f"starting discovery on adapter {path} failed: {exc}")
+        GLib.usleep(10 * 10 ** 6)
+
+    for path, ifaces in om_iface.GetManagedObjects().items():
+        if DEVICE_IFACE in ifaces and ifaces[DEVICE_IFACE]["Address"] in DEVICE_MAC:
+            obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
+            conn = obj.Get(DEVICE_IFACE, "Connected", dbus_interface=DBUS_PROP_IFACE)
+            if conn:
+                if hard:
+                    try:
+                        obj.Disconnect(dbus_interface=DEVICE_IFACE)
+                        log(f"disconnecting from device {path}")
+                        GLib.usleep(4 * 10 ** 6)
+                    except Exception as exc:
+                        log(f"disconnecting from device {path} failed: {exc}")
+            else:
+                try:
+                    log(f"connecting to device {path}")
+                    obj.Connect(dbus_interface=DEVICE_IFACE)
+                except Exception as exc:
+                    log(f"connecting to device {path} failed: {exc}")
+
+    if hard:
+        for path, ifaces in om_iface.GetManagedObjects().items():
+            if ADAPTER_IFACE in ifaces:
+                obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
+                try:
+                    obj.StopDiscovery(dbus_interface=ADAPTER_IFACE)
+                    log(f"stopping discovery on adapter {path}")
+                except Exception as exc:
+                    log(f"stopping discovery on adapter {path} failed: {exc}")
+
     return True
 
-def query_heartrate_services():
-    for sv, char, ctrl in heartrate_services:
+def query_motion():
+    log(f"trying to read motion")
+    om_iface = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, '/'), DBUS_OM_IFACE)
+    for path, ifaces in om_iface.GetManagedObjects().items():
+        if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == MOTION_CHRC_UUID:
+            try:
+                log(f"reading motion from characteristic {path}")
+                obj = bus.get_object(BLUEZ_SERVICE_NAME, path)
+                val = obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
+                x, y, z = struct.unpack("<hhh", bytes(val))
+                log(f"! motion {path} {x} {y} {z}")
+            except Exception as exc:
+                log(f"reading motion from characteristic {path} failed: {exc}")
+
+    return True
+
+def query_heartrate():
+    log(f"trying to read heartrate")
+    om_iface = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, '/'), DBUS_OM_IFACE)
+    services = []
+    for path, ifaces in om_iface.GetManagedObjects().items():
+        if GATT_SERVICE_IFACE in ifaces and ifaces[GATT_SERVICE_IFACE]["UUID"] == HEARTRATE_SVC_UUID:
+            services.append([path, None, None])
+        if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == HEARTRATE_CHRC_UUID:
+            service_path = bus.get_object(BLUEZ_SERVICE_NAME, path) \
+                    .Get(GATT_CHRC_IFACE, "Service", dbus_interface=DBUS_PROP_IFACE)
+            for service in services:
+                if service[0] == service_path:
+                    service[1] = path
+        if GATT_CHRC_IFACE in ifaces and ifaces[GATT_CHRC_IFACE]["UUID"] == HEARTRATE_CTRL_CHRC_UUID:
+            service_path = bus.get_object(BLUEZ_SERVICE_NAME, path) \
+                    .Get(GATT_CHRC_IFACE, "Service", dbus_interface=DBUS_PROP_IFACE)
+            for service in services:
+                if service[0] == service_path:
+                    service[2] = path
+
+    for _, char_path, ctrl_path in services:
+        if path is None or ctrl_path is None:
+            continue
+
         try:
-            char_obj = bus.get_object(BLUEZ_SERVICE_NAME, char)
-            ctrl_obj = bus.get_object(BLUEZ_SERVICE_NAME, ctrl)
+            log(f"reading heart rate from characteristic {char_path} with control {ctrl_path}")
+            char_obj = bus.get_object(BLUEZ_SERVICE_NAME, char_path)
+            ctrl_obj = bus.get_object(BLUEZ_SERVICE_NAME, ctrl_path)
             ctrl_obj.WriteValue(b"\x01", {}, dbus_interface=GATT_CHRC_IFACE)
-            def ready():
-                val = char_obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
-                hr = int(val[1])
-                msg = f"{time.time():.6f} {sv} {hr}\n"
-                hr_log.write(msg)
-                hr_log.flush()
-                ctrl_obj.WriteValue(b"\x00", {}, dbus_interface=GATT_CHRC_IFACE)
-            GLib.timeout_add(9000, ready)
-        except Exception as e:
-            log(f"{sv} measure failed: {e}")
+            # TODO Parallelize sleep if reading multiple watches
+            GLib.usleep(10 * 10 ** 6)
+            val = char_obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
+            hr = int(val[1])
+            log(f"! hr {char_path} {ctrl_path} {hr}")
+            ctrl_obj.WriteValue(b"\x00", {}, dbus_interface=GATT_CHRC_IFACE)
+        except Exception as exc:
+            log(f"reading heart rate from characteristic {char_path} with control {ctrl_path} failed: {exc}")
+
     return True
 
-def main():
-    global bus, mainloop, motion_log, hr_log
+if __name__ == "__main__":
     DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
+    log_file = open("data2/log", "a")
     mainloop = GLib.MainLoop()
-    motion_log = open("data/motion.log", "a")
-    hr_log = open("data/hr.log", "a")
 
-    om_iface = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, '/'), DBUS_OM_IFACE)
-    om_iface.connect_to_signal("InterfacesAdded", interfaces_added)
-    om_iface.connect_to_signal("InterfacesRemoved", interfaces_removed)
-    for path, ifaces in om_iface.GetManagedObjects().items():
-        interfaces_added(path, ifaces)
-
-    query_motion_interval = 1000
-    GLib.timeout_add(query_motion_interval, query_motion_services)
-    query_heartrate_interval = 20000
-    GLib.timeout_add(query_heartrate_interval, query_heartrate_services)
+    reset_connection(True)
+    GLib.timeout_add(5000, lambda:reset_connection(False))
+    GLib.timeout_add(300000, lambda:reset_connection(True))
+    GLib.timeout_add(3000, query_motion)
+    GLib.timeout_add(60000, query_heartrate)
 
     mainloop.run()
-
-if __name__ == '__main__':
-    main()

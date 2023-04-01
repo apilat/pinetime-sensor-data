@@ -1,38 +1,38 @@
 import matplotlib.pyplot as plt
+from collections import namedtuple
 from datetime import datetime
 import numpy as np
-import math
-import json
 
-axis = []
-data = [[], [], []]
+Datapoint = namedtuple("Datapoint", ("timestamp", "data"))
+
+motion_data = []
+hr_data = []
 for line in open(0):
-    time, _, x, y, z = line.split()
+    if line.strip() == '': continue
+    time, *msg = line.split(' ')
+    if msg[0] != '!': continue
     time = datetime.fromtimestamp(float(time))
-    x, y, z = map(float, (x, y, z))
-    axis.append(time)
-    data[0].append(x)
-    data[1].append(y)
-    data[2].append(z)
-axis = np.array(axis)
-data = [np.array(x) for x in data]
+    if msg[1] == "motion":
+        x, y, z = int(msg[3]), int(msg[4]), int(msg[5])
+        motion_data.append(Datapoint(time, y))
+    elif msg[1] == "hr":
+        hr = int(msg[4])
+        hr_data.append(Datapoint(time, hr))
 
-def deltas(data):
-    return data - np.roll(data,-1)
+color = "green"
+fig, ax1 = plt.subplots()
+ax1.set_xlabel("Time")
+ax1.set_ylabel("Orientation", color=color)
+ax1.plot([d.timestamp for d in motion_data],
+         [d.data for d in motion_data],
+         color=color)
 
-def aggregate(data, k):
-    data = data.copy()
-    data.resize((len(data) + k - 1) // k * k)
-    return data.reshape((-1,k)).sum(axis=1) / k
+color = "red"
+ax2 = ax1.twinx()
+ax2.set_ylabel("Heart rate", color=color)
+ax2.plot([d.timestamp for d in hr_data],
+         [d.data for d in hr_data],
+         color=color)
 
-interval = 1
-#for i, a in ((0, "x"), (1, "y"), (2, "z")):
-for i, a in ((2, "z"),):
-    plt.plot(axis[::interval], aggregate(data[i], interval), label=a)
-    #plt.plot(axis, deltas(data[i]), label=a)
-
-#abs_deltas = np.array([math.hypot(*ds) for ds in zip(*map(deltas, data))])
-#plt.plot(axis[::interval], aggregate(abs_deltas, interval), label="agg")
-
-plt.legend()
+fig.tight_layout()
 plt.show()
