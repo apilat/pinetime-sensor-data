@@ -6,6 +6,7 @@ from collections import namedtuple
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
+from threading import Thread
 
 
 BLUEZ_SERVICE_NAME = 'org.bluez'
@@ -45,7 +46,7 @@ def reset_connection(hard):
                     log(f"starting discovery on adapter {path}")
                 except Exception as exc:
                     log(f"starting discovery on adapter {path} failed: {exc}")
-        GLib.usleep(10 * 10 ** 6)
+        time.sleep(10)
 
     for path, ifaces in om_iface.GetManagedObjects().items():
         if DEVICE_IFACE in ifaces and ifaces[DEVICE_IFACE]["Address"] in DEVICE_MAC:
@@ -56,7 +57,7 @@ def reset_connection(hard):
                     try:
                         obj.Disconnect(dbus_interface=DEVICE_IFACE)
                         log(f"disconnecting from device {path}")
-                        GLib.usleep(4 * 10 ** 6)
+                        time.sleep(4)
                     except Exception as exc:
                         log(f"disconnecting from device {path} failed: {exc}")
             else:
@@ -119,12 +120,12 @@ def query_heartrate():
             continue
 
         try:
-            log(f"reading heart rate from characteristic {char_path} with control {ctrl_path}")
+            log(f"enabling heart rate collection on characteristic {char_path} with control {ctrl_path}")
             char_obj = bus.get_object(BLUEZ_SERVICE_NAME, char_path)
             ctrl_obj = bus.get_object(BLUEZ_SERVICE_NAME, ctrl_path)
             ctrl_obj.WriteValue(b"\x01", {}, dbus_interface=GATT_CHRC_IFACE)
-            # TODO Parallelize sleep if reading multiple watches
-            GLib.usleep(10 * 10 ** 6)
+            time.sleep(16)
+            log(f"reading heart rate from characteristic {char_path} with control {ctrl_path}")
             val = char_obj.ReadValue({}, dbus_interface=GATT_CHRC_IFACE)
             hr = int(val[1])
             log(f"! hr {char_path} {ctrl_path} {hr}")
@@ -134,16 +135,21 @@ def query_heartrate():
 
     return True
 
+def loop(timeout, fn):
+    while True:
+        fn()
+        time.sleep(timeout)
+
 if __name__ == "__main__":
     DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
-    log_file = open("data2/log", "a")
+    log_file = open("data/log", "a")
     mainloop = GLib.MainLoop()
 
     reset_connection(True)
-    GLib.timeout_add(5000, lambda:reset_connection(False))
-    GLib.timeout_add(300000, lambda:reset_connection(True))
-    GLib.timeout_add(3000, query_motion)
-    GLib.timeout_add(60000, query_heartrate)
+    Thread(target=lambda: loop(5, lambda:reset_connection(False))).start()
+    Thread(target=lambda: loop(300, lambda:reset_connection(True))).start()
+    Thread(target=lambda: loop(3, query_motion)).start()
+    Thread(target=lambda: loop(10, query_heartrate)).start()
 
     mainloop.run()
